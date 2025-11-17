@@ -1,0 +1,35 @@
+# Python缓存和二进制
+__pycache__/
+*.pyc
+*.pyo
+
+# VSCode/临时目录
+.vscode/
+.cursor/
+.ipynb_checkpoints/
+
+# 日志和临时文件
+*.log
+*.out
+reorganize_output.log
+
+# 数据和大文件夹（实际数据不加入git）
+年度数据_去重后/
+三模态齐全病例/
+三模态齐全病例_去重后_新版/
+2023数据/
+2024数据/
+2025数据/
+
+# 常见图片和医学大文件
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.pdf
+
+# 操作系统/编辑器产生的杂项
+.DS_Store
+Thumbs.db
