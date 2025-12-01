@@ -165,6 +165,57 @@ def analyze_pdf_info(pdf_path, brightness_threshold=80):
         print(f"  警告: 无法分析PDF - {e}")
         return None
 
+def is_fa_icga_combined_image(pil_image, pdf_info=None):
+    """
+    检测图像是否是FA+ICGA组合图像（左右拼接）
+    
+    Args:
+        pil_image: PIL图像对象
+        pdf_info: PDF信息字典（可选，用于辅助判断）
+    
+    Returns:
+        bool: 如果是组合图像返回True
+    """
+    width, height = pil_image.size
+    
+    # 判断标准1: 宽度大约是高度的2倍（比例在1.8-2.2之间）
+    aspect_ratio = width / height if height > 0 else 0
+    is_combined_by_size = 1.8 <= aspect_ratio <= 2.2
+    
+    # 判断标准2: PDF信息显示同时有FA和ICGA，且出现次数相同（或接近）
+    is_combined_by_pdf_info = False
+    if pdf_info:
+        has_ffa = pdf_info.get('has_ffa', False)
+        has_icga = pdf_info.get('has_icga', False)
+        fa_count = pdf_info.get('fa_count', 0)
+        icga_count = pdf_info.get('icga_count', 0)
+        
+        # 只有当FA和ICGA都存在，且出现次数相同（或接近，允许±1的容差）时，才认为是组合图像
+        if has_ffa and has_icga and fa_count > 0 and icga_count > 0:
+            # 允许±1的容差，因为可能有计数误差
+            count_diff = abs(fa_count - icga_count)
+            is_combined_by_pdf_info = count_diff <= 1
+    
+    # 判断标准3: 宽度足够大（通常组合图像宽度>1000）
+    is_large_enough = width >= 1000
+    
+    return (is_combined_by_size or is_combined_by_pdf_info) and is_large_enough
+
+def crop_fa_from_combined_image(pil_image):
+    """
+    从FA+ICGA组合图像中裁剪出左边的FA部分
+    
+    Args:
+        pil_image: PIL图像对象（组合图像）
+    
+    Returns:
+        PIL图像对象（FA部分）
+    """
+    width, height = pil_image.size
+    # 裁剪左边一半（FA部分）
+    left_half = pil_image.crop((0, 0, width // 2, height))
+    return left_half
+
 def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, extract_ir=False, pdf_index=1):
     """
     从PDF提取图像，如果是FFA则保存，可选择是否提取IR
@@ -226,7 +277,9 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
         
         text_dict = page.get_text("dict")
         timestamp_entries = []
-        eye_by_column = defaultdict(lambda: "未知")
+        eye_by_column = defaultdict(lambda: {"eye": "未知", "strength": "weak"})
+        strong_right_keywords = ["RIGHT EYE SELECTED", "RIGHT EYE"]
+        strong_left_keywords = ["LEFT EYE SELECTED", "LEFT EYE"]
         label_blocks = []
         
         for block in text_dict.get("blocks", []):
@@ -252,19 +305,50 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                             "x": bbox[0],
                             "y": bbox[1]
                         })
-                    if any(keyword in text_upper for keyword in ["RIGHT EYE SELECTED", "RIGHT EYE", "OD"]):
-                        col = 1 if bbox[0] < page_mid_x else 2
-                        eye_by_column[col] = "右眼(OD)"
-                    if any(keyword in text_upper for keyword in ["LEFT EYE SELECTED", "LEFT EYE", "OS"]):
-                        col = 1 if bbox[0] < page_mid_x else 2
-                        eye_by_column[col] = "左眼(OS)"
+                    column_num = 1 if bbox[0] < page_mid_x else 2
+
+                    def update_eye(column, eye_label, strength):
+                        current = eye_by_column[column]
+                        if strength == "strong" or current["strength"] != "strong":
+                            eye_by_column[column] = {"eye": eye_label, "strength": strength}
+
+                    if any(keyword in text_upper for keyword in strong_right_keywords):
+                        update_eye(column_num, "右眼(OD)", "strong")
+                    elif text_content.strip().upper() == "OD" or "右眼" in text_content:
+                        update_eye(column_num, "右眼(OD)", "weak")
+
+                    if any(keyword in text_upper for keyword in strong_left_keywords):
+                        update_eye(column_num, "左眼(OS)", "strong")
+                    elif text_content.strip().upper() == "OS" or "左眼" in text_content:
+                        update_eye(column_num, "左眼(OS)", "weak")
         
-        # 如果整体PDF识别出了眼别，但列级未识别，则同步到列
-        if pdf_info['eye'] in ("右眼(OD)", "左眼(OS)"):
-            default_eye = pdf_info['eye']
-            for col in (1, 2):
-                if eye_by_column[col] == "未知":
-                    eye_by_column[col] = default_eye
+        def normalize_eye(s):
+            if s == "右眼(OD)":
+                return "OD"
+            if s == "左眼(OS)":
+                return "OS"
+            return "unknown"
+        
+        # 如果整份PDF只有单眼信息，且列级没有强标记，则保持与整份一致
+
+        pdf_eye_norm = normalize_eye(pdf_info['eye'])
+        if pdf_eye_norm in ("OD", "OS"):
+            has_strong_conflict = any(
+                info["strength"] == "strong" and normalize_eye(info["eye"]) not in ("unknown", pdf_eye_norm)
+                for info in eye_by_column.values()
+            )
+            if not has_strong_conflict:
+                default_eye_label = "右眼(OD)" if pdf_eye_norm == "OD" else "左眼(OS)"
+                for col in (1, 2):
+                    if eye_by_column[col]["strength"] != "strong":
+                        eye_by_column[col] = {"eye": default_eye_label, "strength": "default"}
+        else:
+            # 如果列仍未知，回退到整份PDF的眼别
+            if pdf_info['eye'] in ("右眼(OD)", "左眼(OS)"):
+                default_eye_label = pdf_info['eye']
+                for col in (1, 2):
+                    if eye_by_column[col]["eye"] == "未知":
+                        eye_by_column[col] = {"eye": default_eye_label, "strength": "default"}
         
         stripes_by_column = defaultdict(list)
         standard_candidates = []
@@ -311,13 +395,6 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
             except Exception as e:
                 print(f"  警告: 图像 {img_index + 1} 读取失败 - {e}")
         
-        def normalize_eye(s):
-            if s == "右眼(OD)":
-                return "OD"
-            if s == "左眼(OS)":
-                return "OS"
-            return "unknown"
-        
         # 若不存在条带数据，则退回保存标准图像
         has_stripes = any(rect_list for rect_list in stripes_by_column.values())
         if not has_stripes:
@@ -343,13 +420,29 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                     label_clean = label.replace(" ", "_").replace("°", "deg").replace("[", "").replace("]", "")
                     label_clean = re.sub(r'[^\w\-_\.\:]', '_', label_clean)
                 
-                eye_str = normalize_eye(eye_by_column[candidate["column"]])
+                eye_str = normalize_eye(eye_by_column[candidate["column"]]["eye"])
+                
+                # 检测是否是FA+ICGA组合图像，如果是则裁剪左边FA部分
+                is_combined = False
+                if is_fa_icga_combined_image(pil_image, pdf_info):
+                    pil_image = crop_fa_from_combined_image(pil_image)
+                    width, height = pil_image.size  # 更新尺寸
+                    is_combined = True
+                    # 在文件名中添加FA标识
+                    if label_clean:
+                        if 'FA' not in label_clean.upper():
+                            label_clean = f"FA_{label_clean}"
+                    else:
+                        label_clean = "FA"
+                
                 # 新的命名——干净只从眼别开始，如 OD_pdf1_col2_img1_....
+                # 如果是从组合图像裁剪的，添加combine标识
+                combine_suffix = "_combine" if is_combined else ""
                 if label_clean:
-                    output_name = f"{eye_str}_pdf{pdf_index}_page{page_num+1}_{label_clean}.{candidate['ext']}"
+                    output_name = f"{eye_str}_pdf{pdf_index}_page{page_num+1}_{label_clean}{combine_suffix}.{candidate['ext']}"
                 else:
                     next_index = total_images + 1
-                    output_name = f"{eye_str}_pdf{pdf_index}_page{page_num+1}_img{next_index}.{candidate['ext']}"
+                    output_name = f"{eye_str}_pdf{pdf_index}_page{page_num+1}_img{next_index}{combine_suffix}.{candidate['ext']}"
                 
                 output_path = output_dir / output_name
                 pil_image.save(output_path)
@@ -398,6 +491,12 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                 pix_bytes = pix.tobytes("png")
                 pil_image = Image.open(io.BytesIO(pix_bytes))
                 
+                # 检测是否是FA+ICGA组合图像，如果是则裁剪左边FA部分
+                is_combined = False
+                if is_fa_icga_combined_image(pil_image, pdf_info):
+                    pil_image = crop_fa_from_combined_image(pil_image)
+                    is_combined = True
+                
                 # 查找最近的时间戳
                 closest_timestamp = "no-time"
                 min_time_distance = float('inf')
@@ -413,10 +512,11 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                         if match:
                             closest_timestamp = match.group(1).replace(':', '-')
                 
-                eye_str = normalize_eye(eye_by_column[col_num])
-                # 新的命名
+                eye_str = normalize_eye(eye_by_column[col_num]["eye"])
+                # 新的命名，如果是从组合图像裁剪的，添加combine标识
+                combine_suffix = "_combine" if is_combined else ""
                 output_name = (
-                    f"{eye_str}_pdf{pdf_index}_page{page_num+1}_col{col_num}_img{idx_in_col}_{closest_timestamp}.png"
+                    f"{eye_str}_pdf{pdf_index}_page{page_num+1}_col{col_num}_img{idx_in_col}_{closest_timestamp}{combine_suffix}.png"
                 )
 
                 output_path = output_dir / output_name
@@ -573,11 +673,6 @@ def main():
     else:
         # 处理目录
         process_directory(input_path, output_dir, brightness_threshold)
-
-if __name__ == '__main__':
-    main()
-
-
 
 if __name__ == '__main__':
     main()

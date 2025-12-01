@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 from collections import defaultdict
 import re
+from datetime import datetime
 
 def find_patient_images_in_disease_folder(patient_name, search_dirs, disease_name):
     """
@@ -536,14 +537,15 @@ def reorganize_by_excel(excel_path, source_base_dir, target_dir):
     print(f"\n目标目录: {target_path}")
     print("="*70)
     
-    # 生成详细的特殊情况报告文件
-    report_file = target_path / "特殊情况报告.txt"
+    # 生成详细的特殊情况报告文件（添加时间戳避免覆盖）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_file = target_path / f"特殊情况报告_{timestamp}.txt"
     with open(report_file, 'w', encoding='utf-8') as f:
         f.write("="*70 + "\n")
         f.write("数据集重组特殊情况详细报告\n")
         f.write("="*70 + "\n")
         f.write(f"生成时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Excel文件: 归总_有欧堡图像_修正版.xlsx\n")
+        f.write(f"Excel文件: 归总_修正.xlsx\n")
         f.write("="*70 + "\n")
         
         f.write("\n【重要说明】\n")
@@ -628,11 +630,9 @@ def reorganize_by_excel(excel_path, source_base_dir, target_dir):
                 images = unused_images[batch_name]
                 if images:
                     f.write(f"\n{batch_name} ({len(images)}个文件):\n")
-                    # 只列出前50个，避免文件过大
-                    for i, img in enumerate(images[:50], 1):
+                    # 列出所有文件，不省略
+                    for i, img in enumerate(images, 1):
                         f.write(f"  {i}. {img}\n")
-                    if len(images) > 50:
-                        f.write(f"  ... 还有 {len(images)-50} 个文件（已省略）\n")
         else:
             f.write("\n所有原始图片都已被使用\n")
         
@@ -643,12 +643,12 @@ def reorganize_by_excel(excel_path, source_base_dir, target_dir):
     print(f"\n✅ 特殊情况详细报告已保存到: {report_file}")
 
 def main():
-    excel_path = "/data2/xuhanyang/dataset/沈俊慧/归总_有欧堡图像_修正版.xlsx"
+    excel_path = "/data2/xuhanyang/dataset/沈俊慧/归总_修正.xlsx"
     source_base_dir = "/data2/xuhanyang/dataset"
-    target_dir = "/data2/xuhanyang/dataset/沈俊慧_Excel重组数据集_v3"
+    target_dir = "/data2/xuhanyang/dataset/沈俊慧_Excel重组数据集_v4"
     
     print("="*70)
-    print("基于归总_有欧堡图像_修正版.xlsx的数据集重组工具（改进版）")
+    print("基于归总_修正.xlsx的数据集重组工具（改进版）")
     print("="*70)
     print(f"Excel文件: {excel_path}")
     print(f"源目录: {source_base_dir}")

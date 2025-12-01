@@ -15,6 +15,16 @@ from PIL import Image
 import io
 import re
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+CPU_COUNT = os.cpu_count() or 1
+DEFAULT_WORKERS = max(1, min(24, CPU_COUNT))
+CONFIGURED_WORKERS = os.environ.get('CSC_WORKERS')
+try:
+    CSC_WORKERS = int(CONFIGURED_WORKERS) if CONFIGURED_WORKERS else DEFAULT_WORKERS
+except ValueError:
+    CSC_WORKERS = DEFAULT_WORKERS
+CSC_WORKERS = max(1, CSC_WORKERS)
 
 # 导入FFA提取功能
 sys.path.append('/data2/xuhanyang/眼科大模型')
@@ -729,6 +739,15 @@ def process_single_case(row, oct_type, output_base_dir, year):
     
     return result
 
+def _process_case_worker(idx, row_dict, oct_type, output_base_dir_str, year):
+    """
+    进程池工作入口，接收序列化后的行数据
+    """
+    row_data = dict(row_dict)
+    output_dir = Path(output_base_dir_str)
+    result = process_single_case(row_data, oct_type, output_dir, year)
+    return idx, result
+
 def process_excel_file(excel_path, oct_type, output_base_dir):
     """
     处理单个Excel文件中指定OCT类型的sheet
@@ -757,26 +776,51 @@ def process_excel_file(excel_path, oct_type, output_base_dir):
     
     print(f"找到 {len(df)} 个病例\n")
     
-    results = []
-    
-    for idx, row in df.iterrows():
-        print(f"[{idx+1}/{len(df)}] 处理病例...")
-        
-        result = process_single_case(row, oct_type, output_base_dir, year)
-        results.append(result)
-        
-        # 输出处理结果
-        print(f"  患者: {result['patient_name']}")
+    results = [None] * len(df)
+    total_cases = len(df)
+    worker_count = min(CSC_WORKERS, total_cases) if total_cases else 1
+    if worker_count > 1:
+        print(f"使用并行进程数: {worker_count}\n")
+    else:
+        print("使用单进程顺序处理\n")
+
+    def log_case_result(case_idx, result):
+        print(f"[{case_idx+1}/{total_cases}] 患者: {result['patient_name']}")
         print(f"  日期: {result['visit_date']} ({result['eye_type']})")
         print(f"  OCT: {'✓' if result['oct_found'] else '✗'} ({result['oct_extracted']}张)")
         print(f"  FFA: {'✓' if result['ffa_found'] else '✗'} ({result['ffa_extracted']}张)")
-        
         if result['errors']:
-            print(f"  ⚠ 问题:")
+            print("  ⚠ 问题:")
             for error in result['errors']:
                 print(f"    - {error}")
         print()
-    
+
+    rows_payload = [(idx, df.iloc[idx].to_dict()) for idx in range(total_cases)]
+
+    if worker_count == 1:
+        for idx, row_dict in rows_payload:
+            result = process_single_case(row_dict, oct_type, output_base_dir, year)
+            results[idx] = result
+            log_case_result(idx, result)
+    else:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _process_case_worker,
+                    idx,
+                    row_dict,
+                    oct_type,
+                    str(output_base_dir),
+                    year
+                ): idx
+                for idx, row_dict in rows_payload
+            }
+
+            for future in as_completed(future_to_idx):
+                case_idx, result = future.result()
+                results[case_idx] = result
+                log_case_result(case_idx, result)
+
     return results
 
 def main():

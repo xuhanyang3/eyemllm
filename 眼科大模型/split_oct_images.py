@@ -279,17 +279,25 @@ def auto_crop_content(img_array, margin=5):
 # 只对规格3、4、8进行分割,其他规格保持原样
 # 坐标说明: 只提取右侧纯OCT扫描图像,去除左侧缩略图、白色分隔线、文字和边框
 OCT_CROP_PRESETS = {
-    (1588, 939): {  # 规格3 (上下左边界不同)
+    (1588, 939): {  # 旧规格(也对应规格7)
         'main_top': (573, 50, 1532, 454),
         'main_bottom': (576, 494, 1532, 898),
+    },
+    (1588, 981): {  # 规格5 (葡萄膜炎新增)
+        'main_top': (600, 50, 1535, 475),
+        'main_bottom': (600, 515, 1535, 940),
     },
     (1648, 939): {  # 规格4 (已手动验证,上下左边界不同)
         'main_top': (573, 50, 1592, 454),
         'main_bottom': (576, 494, 1589, 889),
     },
-    (1648, 979): {  # 规格8
+    (1648, 979): {  # 规格6
         'main_top': (598, 50, 1592, 474),
         'main_bottom': (598, 514, 1592, 938),
+    },
+    (1031, 610): {  # 规格22 (葡萄膜炎新增)
+        'main_top': (374, 33, 993, 295),
+        'main_bottom': (374, 321, 993, 583),
     },
 }
 
@@ -317,6 +325,7 @@ def split_oct_image_grid(image_path, output_dir, base_name, layout='auto', auto_
     
     # 从文件名中提取眼别和文件夹前缀
     filename = image_path.name
+    base_output_prefix = base_name  # 确保保留原始文件名中的 pdf/img 信息
     folder_prefix = ""
     
     if '_main' in filename or '_img' in filename:
@@ -352,14 +361,14 @@ def split_oct_image_grid(image_path, output_dir, base_name, layout='auto', auto_
         # 只保存右侧的纯OCT图像(上下两部分)
         # 保存右上OCT图
         top_part = img.crop(coords['main_top'])
-        output_path = output_dir / f"{eye_str}_{prefix_str}OCT_top.png"
+        output_path = output_dir / f"{base_output_prefix}_OCT_top.png"
         top_part.save(output_path)
         saved_count += 1
         print(f"  保存右上OCT图: {top_part.size[0]}x{top_part.size[1]}")
         
         # 保存右下OCT图
         bottom_part = img.crop(coords['main_bottom'])
-        output_path = output_dir / f"{eye_str}_{prefix_str}OCT_bottom.png"
+        output_path = output_dir / f"{base_output_prefix}_OCT_bottom.png"
         bottom_part.save(output_path)
         saved_count += 1
         print(f"  保存右下OCT图: {bottom_part.size[0]}x{bottom_part.size[1]}")
@@ -374,7 +383,7 @@ def split_oct_image_grid(image_path, output_dir, base_name, layout='auto', auto_
     
     # 保存左侧部分
     left_part = img.crop((0, 0, left_width, height))
-    output_path = output_dir / f"{eye_str}_{prefix_str}left.png"
+    output_path = output_dir / f"{base_output_prefix}_left.png"
     left_part.save(output_path)
     saved_count += 1
     print(f"  保存左侧缩略图区域: {left_width}x{height}")
@@ -407,7 +416,7 @@ def split_oct_image_grid(image_path, output_dir, base_name, layout='auto', auto_
                     top_part = Image.fromarray(top_array[top_crop:bottom_crop, left_crop:right_crop])
                     print(f"  自动裁剪上部图像: 上{top_crop}px 下{top_array.shape[0]-bottom_crop}px 左{left_crop}px 右{top_array.shape[1]-right_crop}px")
             
-            output_path = output_dir / f"{eye_str}_{prefix_str}main_top.png"
+            output_path = output_dir / f"{base_output_prefix}_main_top.png"
             top_part.save(output_path)
             saved_count += 1
             print(f"  保存右侧上部主图: {top_part.size[0]}x{top_part.size[1]}")
@@ -422,19 +431,19 @@ def split_oct_image_grid(image_path, output_dir, base_name, layout='auto', auto_
                     bottom_part = Image.fromarray(bottom_array[top_crop:bottom_crop, left_crop:right_crop])
                     print(f"  自动裁剪下部图像: 上{top_crop}px 下{bottom_array.shape[0]-bottom_crop}px 左{left_crop}px 右{bottom_array.shape[1]-right_crop}px")
             
-            output_path = output_dir / f"{eye_str}_{prefix_str}main_bottom.png"
+            output_path = output_dir / f"{base_output_prefix}_main_bottom.png"
             bottom_part.save(output_path)
             saved_count += 1
             print(f"  保存右侧下部主图: {bottom_part.size[0]}x{bottom_part.size[1]}")
         else:
             # 没有找到分割点,保存整个右侧
-            output_path = output_dir / f"{eye_str}_{prefix_str}main.png"
+            output_path = output_dir / f"{base_output_prefix}_main.png"
             right_part.save(output_path)
             saved_count += 1
             print(f"  保存右侧完整主图: {width-left_width}x{height}")
     else:
         # 没有找到分割点,保存整个右侧
-        output_path = output_dir / f"{eye_str}_{prefix_str}main.png"
+        output_path = output_dir / f"{base_output_prefix}_main.png"
         right_part.save(output_path)
         saved_count += 1
         print(f"  保存右侧完整主图: {width-left_width}x{height}")
@@ -445,12 +454,10 @@ def is_composite_image(image_path, size_threshold=0.4):
     """
     判断图像是否为需要分割的复合图像
     
-    只处理3种特定规格:
-    - 规格3: 1588×939
-    - 规格4: 1648×939
-    - 规格8: 1648×979
-    
-    其他规格一律保持原样,不做分割
+    只处理需要裁剪的规格(沿用旧的三种 + 新增四种):
+    - 旧规格: 1588×939、1648×939、1648×979
+    - 新规格: 1588×981、1588×939、1648×979、1031×610
+    (尺寸相同的沿用同一套裁剪坐标)
     
     Args:
         image_path: 图像路径
@@ -463,11 +470,12 @@ def is_composite_image(image_path, size_threshold=0.4):
         img = Image.open(image_path)
         width, height = img.size
         
-        # 只处理规格3、4、8
         target_specs = {
-            (1588, 939): "规格3",
-            (1648, 939): "规格4", 
-            (1648, 979): "规格8",
+            (1588, 981): "规格5",
+            (1648, 979): "规格6",
+            (1588, 939): "规格7",
+            (1648, 939): "规格4",
+            (1031, 610): "规格22",
         }
         
         if (width, height) in target_specs:
@@ -478,6 +486,44 @@ def is_composite_image(image_path, size_threshold=0.4):
         
     except Exception as e:
         return False, f"检测失败: {e}"
+
+def convert_image_to_png(image_path):
+    """
+    将任意格式图像转换为PNG，返回新的PNG路径
+    """
+    image_path = Path(image_path)
+    if image_path.suffix.lower() == '.png':
+        return image_path
+
+    parent = image_path.parent
+    base_name = image_path.stem if image_path.suffix else image_path.name
+    png_path = parent / f"{base_name}.png"
+
+    if png_path.exists():
+        # 已经存在同名PNG, 视为已转换, 只需删除原始文件
+        print(f"  发现已有PNG: {png_path.name} (跳过转换)")
+        try:
+            image_path.unlink()
+            print(f"  删除原始文件: {image_path.name}")
+        except Exception as unlink_err:
+            print(f"  ✗ 删除原始文件失败: {image_path} - {unlink_err}")
+        return png_path
+
+    try:
+        with Image.open(image_path) as img:
+            rgb_img = img.convert('RGB')
+            rgb_img.save(png_path, format='PNG')
+        print(f"  转换为PNG: {image_path.name} -> {png_path.name}")
+        try:
+            image_path.unlink()
+            print(f"  删除原始文件: {image_path.name}")
+        except Exception as unlink_err:
+            print(f"  ✗ 删除原始文件失败: {image_path} - {unlink_err}")
+        return png_path
+    except Exception as e:
+        print(f"  ✗ 转换PNG失败: {image_path} - {e}")
+        return None
+
 
 def process_oct_folder(oct_folder):
     """
@@ -492,8 +538,21 @@ def process_oct_folder(oct_folder):
         print(f"错误: 文件夹不存在 - {oct_folder}")
         return
     
-    # 处理所有PNG图像(排除已经是分割后的图像)
-    image_files = [f for f in oct_folder.glob("*.png") 
+    # 将非PNG图像先转换为PNG
+    raw_image_files = []
+    for ext in ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff']:
+        raw_image_files.extend(oct_folder.glob(ext))
+
+    converted_pngs = []
+    for img_file in raw_image_files:
+        if any(x in img_file.name for x in ['_main_top', '_main_bottom', '_left', '_region']):
+            continue
+        png_path = convert_image_to_png(img_file)
+        if png_path:
+            converted_pngs.append(png_path)
+
+    # 使用转换后的PNG进行分割（排除已分割标记）
+    image_files = [f for f in converted_pngs
                    if not any(x in f.name for x in ['_main_top', '_main_bottom', '_left', '_region'])]
     
     if not image_files:
