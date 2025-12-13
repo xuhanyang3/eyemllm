@@ -123,8 +123,8 @@ def main():
     parser = ArgumentParser(description="压缩数据集文件夹工具")
     parser.add_argument('source_dir', type=str,
                         help='要压缩的源目录')
-    parser.add_argument('--output_dir', type=str, default="/data2/xuhanyang/dataset/dr压缩包",
-                        help='输出压缩包的目录（默认为dr压缩包文件夹）')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='输出压缩包的目录（默认为源目录所在目录）')
     parser.add_argument('--max_size_gb', type=float, default=1.0,
                         help='每个压缩包的最大大小（GB），默认为1.0。如果源目录压缩后小于此值，则生成单个压缩包')
     parser.add_argument('--force_split', action='store_true',
@@ -138,7 +138,10 @@ def main():
         return
     
     # 确定输出目录
-    output_dir = Path(args.output_dir)
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = source_dir.parent
     
     output_dir.mkdir(parents=True, exist_ok=True)
     

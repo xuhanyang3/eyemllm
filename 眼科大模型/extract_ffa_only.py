@@ -49,6 +49,13 @@ def analyze_pdf_info(pdf_path, brightness_threshold=80):
         ir_count += text_upper.count('IR\n')
         ir_count += text_upper.count('INFRARED')
         
+        # BAF图像标识（蓝光自发荧光）
+        baf_count = text_upper.count('BAF ')
+        baf_count += text_upper.count('BAF\n')
+        baf_count += text_upper.count('BLUE FUNDUS AUTOFLUORESCENCE')
+        baf_count += text_upper.count('BLUE FAF')
+        baf_count += text_upper.count('FAF BLUE')
+        
         # 判断眼别（OD=右眼，OS=左眼）
         right_keywords_upper = ['OD', 'RIGHT EYE SELECTED', 'RIGHT EYE']
         left_keywords_upper = ['OS', 'LEFT EYE SELECTED', 'LEFT EYE']
@@ -103,19 +110,24 @@ def analyze_pdf_info(pdf_path, brightness_threshold=80):
         has_ffa = fa_count > 0
         has_icga = icga_count > 0
         has_ir = ir_count > 0
+        has_baf = baf_count > 0
         
-        if has_ffa or has_icga or has_ir:
+        if has_ffa or has_icga or has_ir or has_baf:
             doc.close()
             
             # 确定主要类型
             if has_icga and icga_count > fa_count:
                 pdf_type = 'ICGA'
+            elif has_baf and baf_count > fa_count:
+                pdf_type = 'BAF'
             elif has_ffa and has_ir:
                 pdf_type = 'FFA+IR'
             elif has_ffa:
                 pdf_type = 'FFA'
             elif has_ir:
                 pdf_type = 'IR'
+            elif has_baf:
+                pdf_type = 'BAF'
             else:
                 pdf_type = 'MIXED'
             
@@ -125,9 +137,11 @@ def analyze_pdf_info(pdf_path, brightness_threshold=80):
                 'has_ffa': has_ffa,
                 'has_icga': has_icga,
                 'has_ir': has_ir,
+                'has_baf': has_baf,
                 'fa_count': fa_count,
                 'icga_count': icga_count,
                 'ir_count': ir_count,
+                'baf_count': baf_count,
                 'eye_selected_label': eye_selected_detected
             }
         
@@ -164,6 +178,29 @@ def analyze_pdf_info(pdf_path, brightness_threshold=80):
     except Exception as e:
         print(f"  警告: 无法分析PDF - {e}")
         return None
+
+def is_ir_image(label_text, label_clean=""):
+    """
+    检测图像是否是IR图像（红外图像）
+    
+    Args:
+        label_text: 原始标签文本
+        label_clean: 清理后的标签文本（可选）
+    
+    Returns:
+        bool: 如果是IR图像返回True
+    """
+    if not label_text and not label_clean:
+        return False
+    
+    # 检查原始标签和清理后的标签
+    text_to_check = f"{label_text} {label_clean}".upper()
+    
+    # IR图像的关键词
+    ir_keywords = ['IR', 'INFRARED', '红外']
+    
+    return any(keyword in text_to_check for keyword in ir_keywords)
+
 
 def is_fa_icga_combined_image(pil_image, pdf_info=None):
     """
@@ -240,6 +277,15 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
             'type': 'ICGA', 
             'eye': pdf_info['eye'],
             'message': '跳过ICGA图像'
+        }
+    
+    # 跳过BAF（蓝光自发荧光）
+    if pdf_type == 'BAF':
+        return {
+            'status': 'skipped', 
+            'type': 'BAF', 
+            'eye': pdf_info['eye'],
+            'message': '跳过BAF图像'
         }
     
     # 跳过纯IR（如果不提取IR）
@@ -420,6 +466,10 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                     label_clean = label.replace(" ", "_").replace("°", "deg").replace("[", "").replace("]", "")
                     label_clean = re.sub(r'[^\w\-_\.\:]', '_', label_clean)
                 
+                # 检查是否是IR图像，如果是则跳过
+                if is_ir_image(label, label_clean):
+                    continue  # 跳过IR图像，不保存
+                
                 eye_str = normalize_eye(eye_by_column[candidate["column"]]["eye"])
                 
                 # 检测是否是FA+ICGA组合图像，如果是则裁剪左边FA部分
@@ -497,10 +547,13 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                     pil_image = crop_fa_from_combined_image(pil_image)
                     is_combined = True
                 
-                # 查找最近的时间戳
+                # 查找最近的时间戳和标签
                 closest_timestamp = "no-time"
                 min_time_distance = float('inf')
                 group_center_y = (min_y + max_y) / 2
+                nearby_labels = []
+                timestamp_text = ""
+                
                 for ts in timestamp_entries:
                     ts_col = 1 if ts['x'] < page_mid_x else 2
                     if ts_col != col_num:
@@ -508,9 +561,26 @@ def extract_ffa_images_from_pdf(pdf_path, output_dir, brightness_threshold=80, e
                     dist = abs(ts['y'] - group_center_y)
                     if dist < min_time_distance:
                         min_time_distance = dist
+                        timestamp_text = ts['text']  # 保存完整的时间戳文本用于IR检测
                         match = re.search(r"\((\d{2}:\d{2}\.\d{3})\)", ts["text"])
                         if match:
                             closest_timestamp = match.group(1).replace(':', '-')
+                
+                # 查找附近的标签文本（用于IR检测）
+                for lb in label_blocks:
+                    lb_col = 1 if lb['x'] < page_mid_x else 2
+                    if lb_col != col_num:
+                        continue
+                    dist = abs(lb['y'] - group_center_y)
+                    if dist < 100:  # 在100像素范围内
+                        nearby_labels.append(lb['text'])
+                
+                # 合并所有相关文本用于IR检测
+                all_text_for_ir_check = " ".join(nearby_labels + [timestamp_text])
+                
+                # 检查是否是IR图像，如果是则跳过
+                if is_ir_image(all_text_for_ir_check):
+                    continue  # 跳过IR图像，不保存
                 
                 eye_str = normalize_eye(eye_by_column[col_num]["eye"])
                 # 新的命名，如果是从组合图像裁剪的，添加combine标识
@@ -579,6 +649,7 @@ def process_directory(input_dir, output_dir, brightness_threshold=80):
     
     ffa_count = 0
     icga_count = 0
+    baf_count = 0
     error_count = 0
     total_ffa_images = 0
     
@@ -594,8 +665,14 @@ def process_directory(input_dir, output_dir, brightness_threshold=80):
             total_ffa_images += result['num_images']
         elif result['status'] == 'skipped':
             eye_info = f" - {result['eye']}" if result.get('eye') != "未知" else ""
-            print(f"  ✗ ICGA{eye_info} - 已跳过")
-            icga_count += 1
+            if result['type'] == 'ICGA':
+                print(f"  ✗ ICGA{eye_info} - 已跳过")
+                icga_count += 1
+            elif result['type'] == 'BAF':
+                print(f"  ✗ BAF{eye_info} - 已跳过")
+                baf_count += 1
+            else:
+                print(f"  ✗ {result['type']}{eye_info} - 已跳过")
         else:
             print(f"  ⚠ 错误: {result.get('message', '未知错误')}")
             error_count += 1
@@ -606,6 +683,7 @@ def process_directory(input_dir, output_dir, brightness_threshold=80):
     print("="*70)
     print(f"FFA文件: {ffa_count} 个 (提取 {total_ffa_images} 张图像)")
     print(f"ICGA文件: {icga_count} 个 (已跳过)")
+    print(f"BAF文件: {baf_count} 个 (已跳过)")
     print(f"错误: {error_count} 个")
     print(f"输出目录: {output_dir}")
     print("="*70)
@@ -662,7 +740,12 @@ def main():
             print(f"✓ FFA{eye_info} - 成功提取 {result['num_images']} 张图像")
         elif result['status'] == 'skipped':
             eye_info = f" - {result['eye']}" if result.get('eye') != "未知" else ""
-            print(f"✗ ICGA{eye_info} - 已跳过")
+            if result['type'] == 'ICGA':
+                print(f"✗ ICGA{eye_info} - 已跳过")
+            elif result['type'] == 'BAF':
+                print(f"✗ BAF{eye_info} - 已跳过")
+            else:
+                print(f"✗ {result['type']}{eye_info} - 已跳过")
         else:
             print(f"⚠ 错误: {result.get('message', '未知错误')}")
         
