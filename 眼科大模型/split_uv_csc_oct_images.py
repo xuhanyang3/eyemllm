@@ -8,15 +8,13 @@ import cv2
 import numpy as np
 import argparse
 from pathlib import Path
-import shutil
 
-def split_oct_image(img_path, output_dir):
+def split_oct_image(img_path):
     """
-    分割OCT图像，只保留右侧非正方形部分
+    分割OCT图像，只保留右侧非正方形部分，直接替换原文件
     
     参数:
-        img_path: 输入图像路径
-        output_dir: 输出目录
+        img_path: 图像路径（将直接覆盖）
         
     返回:
         success: 是否成功处理
@@ -41,33 +39,25 @@ def split_oct_image(img_path, output_dir):
         # 提取右侧部分（从split_point到图像末尾）
         right_part = img[:, split_point:width]
         
-        # 创建输出目录（如果不存在）
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 保存右侧部分
-        output_path = os.path.join(output_dir, os.path.basename(img_path))
-        cv2.imwrite(output_path, right_part)
+        # 直接覆盖原文件
+        cv2.imwrite(img_path, right_part)
         
         return True, f"成功处理: {os.path.basename(img_path)}", False
         
     except Exception as e:
         return False, f"处理图像时出错: {str(e)}", False
 
-def process_oct_images(input_root_dir, output_root_dir=None, dry_run=False):
+def process_oct_images(input_root_dir, dry_run=False):
     """
-    批量处理OCT图像
+    批量处理OCT图像，直接在原目录下替换
     
     参数:
         input_root_dir: 输入根目录
-        output_root_dir: 输出根目录（如果为None，则在输入目录下创建_split子目录）
         dry_run: 是否只显示将要处理的文件而不实际处理
         
     返回:
         stats: 处理统计信息
     """
-    if output_root_dir is None:
-        output_root_dir = os.path.join(input_root_dir, "_split")
-    
     stats = {
         "total_cases": 0,
         "processed_cases": 0,
@@ -94,25 +84,6 @@ def process_oct_images(input_root_dir, output_root_dir=None, dry_run=False):
             
         stats["total_cases"] += 1
         
-        # 创建对应的输出目录结构
-        output_patient_dir = os.path.join(output_root_dir, patient_dir)
-        output_oct_dir = os.path.join(output_patient_dir, "OCT")
-        
-        if not dry_run:
-            os.makedirs(output_oct_dir, exist_ok=True)
-            
-            # 如果患者目录下还有FFA目录，也创建它（但只复制文件）
-            ffa_dir = os.path.join(patient_path, "FFA")
-            if os.path.exists(ffa_dir):
-                output_ffa_dir = os.path.join(output_patient_dir, "FFA")
-                os.makedirs(output_ffa_dir, exist_ok=True)
-                
-                # 复制FFA文件
-                for ffa_file in os.listdir(ffa_dir):
-                    src_ffa = os.path.join(ffa_dir, ffa_file)
-                    dst_ffa = os.path.join(output_ffa_dir, ffa_file)
-                    shutil.copy2(src_ffa, dst_ffa)
-        
         # 处理OCT图像
         oct_images = [f for f in os.listdir(oct_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         if not oct_images:
@@ -132,7 +103,7 @@ def process_oct_images(input_root_dir, output_root_dir=None, dry_run=False):
                 stats["processed_images"] += 1
                 continue
                 
-            success, msg, skipped = split_oct_image(img_path, output_oct_dir)
+            success, msg, skipped = split_oct_image(img_path)
             
             if success:
                 print(f"  ✓ {msg}")
@@ -155,11 +126,9 @@ def process_oct_images(input_root_dir, output_root_dir=None, dry_run=False):
     return stats
 
 def main():
-    parser = argparse.ArgumentParser(description="批量处理UV_CSC找不到名单图像提取中的OCT图像，只保留右侧非正方形部分")
+    parser = argparse.ArgumentParser(description="批量处理UV_CSC找不到名单图像提取中的OCT图像，只保留右侧非正方形部分（直接替换原文件）")
     parser.add_argument("--input", "-i", default="/data2/xuhanyang/dataset/UV_CSC找不到名单图像提取",
-                        help="输入目录路径")
-    parser.add_argument("--output", "-o", 
-                        help="输出目录路径（默认在输入目录下创建_split子目录）")
+                        help="输入目录路径（将直接在此目录下修改OCT图像）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只显示将要处理的文件而不实际处理")
     
@@ -172,16 +141,16 @@ def main():
     
     # 处理OCT图像
     print(f"开始处理OCT图像...")
-    print(f"输入目录: {args.input}")
-    if args.output:
-        print(f"输出目录: {args.output}")
-    else:
-        print(f"输出目录: {args.input}/_split")
+    print(f"处理目录: {args.input}")
+    print(f"模式: {'预览模式（不实际修改）' if args.dry_run else '直接替换原文件'}")
+    print("="*70)
     
-    stats = process_oct_images(args.input, args.output, args.dry_run)
+    stats = process_oct_images(args.input, args.dry_run)
     
     # 打印统计信息
-    print("\n处理统计:")
+    print("\n" + "="*70)
+    print("处理统计:")
+    print("="*70)
     print(f"  总患者数: {stats['total_cases']}")
     print(f"  有OCT图像的患者数: {stats['processed_cases']}")
     print(f"  总OCT图像数: {stats['total_images']}")
@@ -205,11 +174,7 @@ def main():
     
     # 将被跳过的文件列表保存到文件中
     if stats['skipped_files'] and not args.dry_run:
-        skipped_files_path = os.path.join(
-            args.output if args.output else os.path.join(args.input, "_split"),
-            "skipped_files.txt"
-        )
-        os.makedirs(os.path.dirname(skipped_files_path), exist_ok=True)
+        skipped_files_path = os.path.join(args.input, "skipped_files.txt")
         with open(skipped_files_path, 'w', encoding='utf-8') as f:
             f.write("被跳过的图像文件列表（宽度不大于高度两倍）:\n\n")
             for skipped in stats['skipped_files']:

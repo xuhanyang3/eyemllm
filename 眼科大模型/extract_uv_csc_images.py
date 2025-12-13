@@ -35,6 +35,10 @@ UV_WORKERS = max(1, UV_WORKERS)
 sys.path.append('/data2/xuhanyang/眼科大模型')
 from extract_ffa_only import extract_ffa_images_from_pdf
 
+# 欧宝图像提取相关常量
+OB_KEYWORDS = ["欧宝", "欧堡", "optos", "激光广角眼底照相", "广角"]
+OB_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
 
 def parse_patient_folder(folder_str):
     """
@@ -227,6 +231,118 @@ def find_exam_folder(base_path, patient_id, visit_date, exam_keyword):
     """返回第一个匹配的检查文件夹(用于FFA等单一检查)"""
     folders = find_exam_folders(base_path, patient_id, visit_date, exam_keyword)
     return folders[0] if folders else None
+
+
+def month_matches(folder_name, target_month):
+    """匹配月份子目录名称（支持 '1', '123', '1-3', '10-12' 等）"""
+    if target_month is None:
+        return True
+    name = folder_name
+    if name == str(target_month):
+        return True
+    if name.isdigit() and str(target_month) in name:
+        return True
+    if "-" in name or "--" in name:
+        parts = re.split(r"-+", name)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            start_m, end_m = int(parts[0]), int(parts[1])
+            if start_m <= end_m:
+                return start_m <= target_month <= end_m
+            return target_month >= start_m or target_month <= end_m
+    return False
+
+
+def find_optos_folder(patient_id, optos_date, patient_path=None):
+    """在原始路径中定位欧宝目录"""
+    if not patient_id or not optos_date:
+        return None
+    
+    # 如果提供了patient_path，先尝试在该路径下查找
+    if patient_path:
+        patient_root = Path(str(patient_path))
+        if patient_root.exists():
+            date_folder = patient_root / optos_date
+            if date_folder.exists():
+                try:
+                    for child in date_folder.iterdir():
+                        if child.is_dir():
+                            name_lower = child.name.lower()
+                            if any(k in name_lower for k in [k.lower() for k in OB_KEYWORDS]):
+                                return child
+                except PermissionError:
+                    pass
+    
+    year = optos_date[:4]
+    base_root = Path(f"/share/kongzitai/ophthalmology/E:/{year}")
+    if not base_root.exists():
+        return None
+
+    # 目标月份
+    try:
+        from datetime import datetime as _dt
+        target_month = _dt.strptime(optos_date, "%Y-%m-%d").month
+    except Exception:
+        target_month = None
+
+    # 收集月份目录并排序：先匹配月份，再其它
+    month_dirs = []
+    try:
+        month_dirs = [d for d in base_root.iterdir() if d.is_dir()]
+    except PermissionError:
+        return None
+
+    ordered_months = []
+    if target_month:
+        for mdir in month_dirs:
+            if month_matches(mdir.name, target_month):
+                ordered_months.append(mdir)
+        for mdir in month_dirs:
+            if mdir not in ordered_months:
+                ordered_months.append(mdir)
+    else:
+        ordered_months = month_dirs
+
+    for mdir in ordered_months:
+        patient_dirs = list(mdir.glob(f"{patient_id}*"))
+        for pdir in patient_dirs:
+            date_dir = pdir / optos_date
+            if not date_dir.exists():
+                continue
+            try:
+                for child in date_dir.iterdir():
+                    if child.is_dir():
+                        name_lower = child.name.lower()
+                        if any(k in name_lower for k in [k.lower() for k in OB_KEYWORDS]):
+                            return child
+            except PermissionError:
+                continue
+    return None
+
+
+def collect_optos_images(src_dir):
+    """收集欧宝目录中的图像文件"""
+    if not src_dir or not src_dir.exists():
+        return []
+    imgs = []
+    for item in sorted(src_dir.iterdir()):
+        if item.is_file() and item.suffix.lower() in OB_IMG_EXTS:
+            imgs.append(item)
+    return imgs
+
+
+def copy_optos_images(images, dst_dir):
+    """复制欧宝图像到目标目录，重名文件自动加后缀"""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for img in images:
+        target = dst_dir / img.name
+        idx = 1
+        while target.exists():
+            target = dst_dir / f"{img.stem}_{idx}{img.suffix}"
+            idx += 1
+        shutil.copy2(img, target)
+        count += 1
+    return count
 
 
 def find_nearest_date_oct_folders(patient_id, visit_date, oct_keywords=None):
@@ -527,10 +643,13 @@ def process_single_case(row, oct_type, output_base_dir, year):
         'eye_type': '',
         'oct_extracted': 0,
         'ffa_extracted': 0,
+        'ob_extracted': 0,
         'oct_found': False,
         'ffa_found': False,
+        'ob_found': False,
         'oct_path': '',
         'ffa_path': '',
+        'ob_path': '',
         'errors': []
     }
 
@@ -569,11 +688,13 @@ def process_single_case(row, oct_type, output_base_dir, year):
     result['visit_date'] = visit_date or ''
     result['eye_type'] = eye_type
 
-    # OCT / FFA 各自的检查日期
+    # OCT / FFA / 欧宝 各自的检查日期
     oct_date_raw = row.get('oct_date', '')
     ffa_date_raw = row.get('ffa_date', '')
+    optos_date_raw = row.get('optos_date', '')
     oct_date, _ = parse_visit_date(oct_date_raw)
     ffa_date, _ = parse_visit_date(ffa_date_raw)
+    optos_date, _ = parse_visit_date(optos_date_raw)
 
     if not oct_date:
         # 回落到就诊日期
@@ -582,8 +703,11 @@ def process_single_case(row, oct_type, output_base_dir, year):
     if not ffa_date:
         ffa_date = visit_date
         result['errors'].append('无法解析FFA日期, 使用visit_date代替')
+    if not optos_date:
+        optos_date = visit_date
+        result['errors'].append('无法解析欧宝日期, 使用visit_date代替')
 
-    if not oct_date and not ffa_date:
+    if not oct_date and not ffa_date and not optos_date:
         result['errors'].append('无法解析任何日期')
         return result
 
@@ -606,6 +730,7 @@ def process_single_case(row, oct_type, output_base_dir, year):
 
     oct_output_dir = case_output_dir / "OCT"
     ffa_output_dir = case_output_dir / "FFA"
+    ob_output_dir = case_output_dir / "欧宝"
 
     # ---------------- 查找 & 提取 OCT ----------------
     # 优先查找顺序：1. 海德堡OCT，2. 其他OCT设备
@@ -823,14 +948,35 @@ def process_single_case(row, oct_type, output_base_dir, year):
         result['errors'].append('未找到造影文件夹')
         result['ffa_found'] = False
 
+    # ---------------- 查找 & 提取 欧宝 ----------------
+    if optos_date:
+        ob_src = find_optos_folder(patient_id, optos_date, patient_path)
+    else:
+        ob_src = None
+
+    if ob_src:
+        result['ob_found'] = True
+        result['ob_path'] = str(ob_src)
+        
+        ob_images = collect_optos_images(ob_src)
+        if ob_images:
+            copied = copy_optos_images(ob_images, ob_output_dir)
+            result['ob_extracted'] = copied
+        else:
+            result['errors'].append('欧宝目录中无图像')
+    else:
+        result['errors'].append('未找到欧宝目录')
+
     # 如果没有提取到任何图像，删除空文件夹
     # 但如果是因为"脉络膜"而跳过提取，保留OCT文件夹
     if result['oct_extracted'] == 0 and oct_output_dir.exists() and not skip_oct_extraction:
         shutil.rmtree(oct_output_dir)
     if result['ffa_extracted'] == 0 and ffa_output_dir.exists():
         shutil.rmtree(ffa_output_dir)
-    # 如果OCT和FFA都没有提取到图像，且不是因为"脉络膜"而保留OCT文件夹，则删除整个病例文件夹
-    if result['oct_extracted'] == 0 and result['ffa_extracted'] == 0:
+    if result['ob_extracted'] == 0 and ob_output_dir.exists():
+        shutil.rmtree(ob_output_dir)
+    # 如果OCT、FFA和欧宝都没有提取到图像，且不是因为"脉络膜"而保留OCT文件夹，则删除整个病例文件夹
+    if result['oct_extracted'] == 0 and result['ffa_extracted'] == 0 and result['ob_extracted'] == 0:
         if not (skip_oct_extraction and oct_output_dir.exists()):
             if case_output_dir.exists():
                 shutil.rmtree(case_output_dir)
@@ -887,6 +1033,7 @@ def process_excel_sheet(excel_path, sheet_name, output_base_dir):
         print(f"  日期: {result['visit_date']} ({result['eye_type']})")
         print(f"  OCT: {'✓' if result['oct_found'] else '✗'} ({result['oct_extracted']}张)")
         print(f"  FFA: {'✓' if result['ffa_found'] else '✗'} ({result['ffa_extracted']}张)")
+        print(f"  欧宝: {'✓' if result['ob_found'] else '✗'} ({result['ob_extracted']}张)")
         if result['errors']:
             print("  ⚠ 问题:")
             for error in result['errors']:
@@ -953,20 +1100,25 @@ def main():
     total_cases = len(all_results)
     oct_found = sum(1 for r in all_results if r['oct_found'])
     ffa_found = sum(1 for r in all_results if r['ffa_found'])
+    ob_found = sum(1 for r in all_results if r['ob_found'])
     total_oct_images = sum(r['oct_extracted'] for r in all_results)
     total_ffa_images = sum(r['ffa_extracted'] for r in all_results)
+    total_ob_images = sum(r['ob_extracted'] for r in all_results)
     cases_with_errors = sum(1 for r in all_results if r['errors'])
 
     if total_cases > 0:
         print(f"总病例数: {total_cases}")
         print(f"找到OCT: {oct_found} ({oct_found/total_cases*100:.1f}%)")
         print(f"找到FFA: {ffa_found} ({ffa_found/total_cases*100:.1f}%)")
+        print(f"找到欧宝: {ob_found} ({ob_found/total_cases*100:.1f}%)")
     else:
         print("总病例数: 0")
         print("找到OCT: 0 (0.0%)")
         print("找到FFA: 0 (0.0%)")
+        print("找到欧宝: 0 (0.0%)")
     print(f"提取OCT图像: {total_oct_images} 张")
     print(f"提取FFA图像: {total_ffa_images} 张")
+    print(f"提取欧宝图像: {total_ob_images} 张")
     print(f"有问题的病例: {cases_with_errors}")
 
     # 保存详细报告
@@ -984,8 +1136,10 @@ def main():
         f.write(f"总病例数: {total_cases}\n")
         f.write(f"找到OCT: {oct_found} ({(oct_found/total_cases*100 if total_cases else 0):.1f}%)\n")
         f.write(f"找到FFA: {ffa_found} ({(ffa_found/total_cases*100 if total_cases else 0):.1f}%)\n")
+        f.write(f"找到欧宝: {ob_found} ({(ob_found/total_cases*100 if total_cases else 0):.1f}%)\n")
         f.write(f"提取OCT图像: {total_oct_images} 张\n")
         f.write(f"提取FFA图像: {total_ffa_images} 张\n")
+        f.write(f"提取欧宝图像: {total_ob_images} 张\n")
         f.write(f"有问题的病例: {cases_with_errors}\n\n")
 
         f.write("="*70 + "\n")
@@ -996,6 +1150,7 @@ def main():
             f.write(f"{i}. {r['patient_name']} - {r['visit_date']} ({r['eye_type']})\n")
             f.write(f"   OCT: {'✓' if r['oct_found'] else '✗'} ({r['oct_extracted']}张)\n")
             f.write(f"   FFA: {'✓' if r['ffa_found'] else '✗'} ({r['ffa_extracted']}张)\n")
+            f.write(f"   欧宝: {'✓' if r['ob_found'] else '✗'} ({r['ob_extracted']}张)\n")
             if r['errors']:
                 f.write("   问题:\n")
                 for e in r['errors']:
@@ -1004,6 +1159,8 @@ def main():
                 f.write(f"   OCT路径: {r['oct_path']}\n")
             if r['ffa_path']:
                 f.write(f"   FFA路径: {r['ffa_path']}\n")
+            if r['ob_path']:
+                f.write(f"   欧宝路径: {r['ob_path']}\n")
             f.write("\n")
 
     print(f"\n详细报告已保存: {report_path}")
